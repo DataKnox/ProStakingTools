@@ -1,16 +1,21 @@
-FROM --platform=linux/amd64 node:latest AS build 
+FROM node:20.18.0-alpine AS build
 
-WORKDIR /react-app
+WORKDIR /app
 
-COPY package*.json ./
+# Build toolchain needed for node-gyp on native deps (usb, etc.) pulled in by wallet adapters.
+RUN apk add --no-cache python3 make g++ linux-headers eudev-dev libusb-dev
 
-COPY yarn.lock ./
-
-RUN yarn install
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile --network-timeout 600000
 
 COPY . .
+RUN yarn build
 
-EXPOSE 3000
+FROM nginx:1.27-alpine AS runtime
 
-# Start the React app
-CMD ["yarn", "start"]
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 8080
+
+CMD ["nginx", "-g", "daemon off;"]

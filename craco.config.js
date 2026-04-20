@@ -13,7 +13,8 @@ module.exports = {
                     "os": require.resolve("os-browserify"),
                     "url": require.resolve("url"),
                     "buffer": require.resolve("buffer"),
-                    "process": require.resolve("process/browser.js")
+                    "process": require.resolve("process/browser.js"),
+                    "vm": false
                 }
             },
             plugins: [

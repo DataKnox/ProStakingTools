@@ -1,0 +1,40 @@
+# ProStakingTools — agent notes
+
+React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts (create/delegate, deactivate, merge, split). Signing is always delegated to the connected wallet (Phantom); this app never handles a user private key, and stake-account keypairs generated for `createAccount`/`split` are discarded after use because authorities are set to the user's wallet.
+
+## Architecture at a glance
+
+- `src/App.js` — wraps the tree in `ConnectionProvider` / `WalletProvider` / `WalletModalProvider`; holds the `StakeModal` open/close state and a `refreshKey` used to remount `StakeAccountList` after a successful stake.
+- `src/components/StakeAccountList.js` — fetches the user's stake accounts via `connection.getParsedProgramAccounts(StakeProgram.programId, {filters: [memcmp at offset 44]})` (offset 44 = withdrawer pubkey in the stake layout), enriches each row with validator info from `api.stakewiz.com`, and exposes per-row Merge/Split/Deactivate actions.
+- `src/components/StakeModal.js` — creates a new stake account (`Keypair.generate()`) + delegates to the hardcoded ProStaking vote account in one transaction.
+- `src/components/MergeStakeModal.js` / `SplitStakeModal.js` — merge/split flows using `signTransaction` + `sendRawTransaction` with blockhash-expiry-aware polling.
+- `src/config/solana.js` — single source of truth for RPC endpoint + shared `Connection`. Do **not** instantiate `new Connection(...)` in components; import `connection` from here.
+- `src/utils/validation.js` — `parseSolAmount`, `toPublicKey`, `isSafeHttpsUrl`. All user-supplied numeric/URL/pubkey input must route through these (they enforce integer-safe lamport math, bounded amounts, and HTTPS-only URLs).
+
+## Conventions
+
+- **Never re-introduce a hardcoded RPC URL.** Use `RPC_ENDPOINT` / `connection` from `src/config/solana.js`. The endpoint comes from `REACT_APP_RPC_ENDPOINT` at build time with a public-mainnet fallback. Any `REACT_APP_*` value is baked into the shipped bundle — treat it as public.
+- **Never mutate instruction keys.** The original merge flow had `transaction.instructions[0].keys[1].pubkey = ...`, which relied on undocumented web3.js key ordering. Build the instruction correctly via the program builder and leave it alone.
+- **Modern blockhash / confirmation only.** Use `getLatestBlockhash()` and `confirmTransaction({ signature, blockhash, lastValidBlockHeight })`. Never `getRecentBlockhash()` or single-arg `confirmTransaction(sig)` — they silently drop expired TXs.
+- **Third-party data is untrusted.** Any field from `api.stakewiz.com` (or future RPC/third-party sources) must be type-checked, length-clamped, and scheme-validated before being rendered or embedded in a URL. The validator image URL goes through `isSafeHttpsUrl`.
+- **No `console.log` on user/wallet state.** Pubkeys, amounts, and signatures must not be logged in production paths.
+- **No `window.location.reload()` for refresh.** Use a React `key` bump.
+- Web3.js resolved version is 1.98.2 (via `^1.87.6`). `StakeProgram.split(params, rentExemptReserve)` is the required two-arg signature — omitting the second arg produces a broken transaction.
+
+## Build & run
+
+- Node is pinned to `20.18.0` via `.nvmrc` and `package.json` `engines`. The app will refuse to install/build on other versions.
+- `yarn start` — CRA dev server on `:3000` (craco config). Expect source-map warnings from `@trezor/*` and `@reown/*`; those are cosmetic.
+- `yarn build` — production bundle. Needs `"vm": false` in `craco.config.js`'s `resolve.fallback` for `asn1.js` to compile under webpack 5 (already set).
+- Container: `docker buildx build --builder desktop-linux --platform linux/amd64 -t juicystake/tools:<tag> --load .`
+  - Deployment target is `linux/amd64`; default `docker build` on an arm64 Mac produces arm64 images that won't run on the host.
+  - Build stage needs `python3 make g++ linux-headers eudev-dev libusb-dev` in Alpine for `node-gyp` to compile the native `usb` module pulled in by `@solana/wallet-adapter-wallets` → Trezor. (Installing only `@solana/wallet-adapter-phantom` would remove this dependency chain — see follow-ups in `SECURITY_AUDIT.md`.)
+  - Runtime is `nginx:1.27-alpine`; security headers live in `nginx.conf` (strict CSP, frame-ancestors none, HSTS, etc.).
+- Meta CSP in `public/index.html` is intentionally lenient (`'unsafe-inline' 'unsafe-eval'`) so CRA HMR works in dev. The nginx CSP header is strict and takes precedence in prod because browsers enforce the intersection of meta + header.
+
+## Gotchas / known landmines
+
+- `@solana/wallet-adapter-wallets` brings in the full wallet set including Trezor USB; currently only Phantom is actually instantiated in `App.js`. Dropping the meta-package in favor of `@solana/wallet-adapter-phantom` would eliminate the native-build requirement and shrink the image.
+- `react-scripts@5.0.1` is unmaintained; `npm audit` will flag transitive build-time CVEs (`nth-check@1.0.2`, `svgo@1.3.2`, `webpack-dev-server@4.15.2`). These do not ship in the runtime bundle and are not reachable in the production container (nginx serves the built static files). A migration off CRA is on the follow-up list.
+- The previously-hardcoded Helius RPC URL (`cherise-ldxzh0-…-helius-rpc.com`) is still in git history (commit `6c7381e` and earlier) and should be treated as compromised — rotate before the new tenant relies on it.
+- `SECURITY_AUDIT.md` at the repo root is the canonical record of the 2026-04-20 audit: findings, remediations, residual risks.

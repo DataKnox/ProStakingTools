@@ -1,17 +1,24 @@
 import React, { useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { Connection, PublicKey, Transaction, SystemProgram, StakeProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
+import {
+    PublicKey,
+    Transaction,
+    StakeProgram,
+    LAMPORTS_PER_SOL,
+    Keypair,
+    Authorized,
+    Lockup,
+    VOTE_PROGRAM_ID,
+} from '@solana/web3.js';
 import Toast from './Toast';
+import { connection, PROSTAKING_VOTE_ACCOUNT } from '../config/solana';
+import { parseSolAmount } from '../utils/validation';
 
 const StakeModal = ({ isOpen, onClose, onSuccess }) => {
     const { publicKey, sendTransaction } = useWallet();
     const [amount, setAmount] = useState('');
     const [loading, setLoading] = useState(false);
     const [toast, setToast] = useState(null);
-
-    const connection = new Connection('https://cherise-ldxzh0-fast-mainnet.helius-rpc.com');
-    // ProStaking's vote account address
-    const PROSTAKING_VOTE_ACCOUNT = 'juicQdAnksqZ5Yb8NQwCLjLWhykvXGktxnQCDvMe6Nx';
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -20,102 +27,77 @@ const StakeModal = ({ isOpen, onClose, onSuccess }) => {
         try {
             setLoading(true);
 
-            const amountInLamports = parseFloat(amount) * LAMPORTS_PER_SOL;
-            console.log('Amount in lamports:', amountInLamports);
+            const amountInLamports = parseSolAmount(amount);
 
-            // Generate a new keypair for the stake account
             const stakeAccount = Keypair.generate();
-            console.log('Stake account pubkey:', stakeAccount.publicKey.toString());
 
-            // Get the minimum balance for rent exemption
             const rentExemptReserve = await connection.getMinimumBalanceForRentExemption(
                 StakeProgram.space
             );
-            console.log('Rent exempt reserve:', rentExemptReserve);
 
-            // Calculate total lamports needed (stake amount + rent exempt reserve)
             const totalLamports = amountInLamports + rentExemptReserve;
-            console.log('Total lamports needed:', totalLamports);
 
-            // Get the balance of the wallet
             const balance = await connection.getBalance(publicKey);
-            console.log('Wallet balance:', balance);
-
             if (balance < totalLamports) {
-                throw new Error(`Insufficient balance. Need ${totalLamports / LAMPORTS_PER_SOL} SOL (including rent-exempt reserve)`);
+                throw new Error(
+                    `Insufficient balance. Need ${totalLamports / LAMPORTS_PER_SOL} SOL (including rent-exempt reserve)`
+                );
             }
 
-            // Verify the vote account exists and is valid
-            const voteAccountInfo = await connection.getAccountInfo(new PublicKey(PROSTAKING_VOTE_ACCOUNT));
+            const voteAccountInfo = await connection.getAccountInfo(PROSTAKING_VOTE_ACCOUNT);
             if (!voteAccountInfo) {
-                throw new Error('Invalid vote account address');
+                throw new Error('Vote account not found');
+            }
+            if (!voteAccountInfo.owner.equals(VOTE_PROGRAM_ID)) {
+                throw new Error('Configured vote account is not owned by the Vote program');
             }
 
-            // Create the create account instruction
             const createAccountInstruction = StakeProgram.createAccount({
                 fromPubkey: publicKey,
                 stakePubkey: stakeAccount.publicKey,
-                authorized: {
-                    staker: publicKey,
-                    withdrawer: publicKey,
-                },
+                authorized: new Authorized(publicKey, publicKey),
                 lamports: totalLamports,
-                lockup: {
-                    epoch: 0,
-                    unixTimestamp: 0,
-                    custodian: publicKey,
-                },
+                lockup: new Lockup(0, 0, PublicKey.default),
             });
 
-            // Create the delegate instruction
             const delegateInstruction = StakeProgram.delegate({
                 stakePubkey: stakeAccount.publicKey,
                 authorizedPubkey: publicKey,
-                votePubkey: new PublicKey(PROSTAKING_VOTE_ACCOUNT),
+                votePubkey: PROSTAKING_VOTE_ACCOUNT,
             });
 
-            // Get the latest blockhash
             const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
 
-            // Create the transaction
             const transaction = new Transaction()
                 .add(createAccountInstruction)
                 .add(delegateInstruction);
-
             transaction.recentBlockhash = blockhash;
             transaction.feePayer = publicKey;
 
-            // Show transaction submitted toast
             setToast({
                 message: 'Please approve the transaction in your wallet...',
                 type: 'success'
             });
 
-            // Send the transaction
             const signature = await sendTransaction(transaction, connection, {
                 signers: [stakeAccount]
             });
-            console.log('Transaction signature:', signature);
 
-            // Show confirmation toast
             setToast({
                 message: 'Transaction submitted. Waiting for confirmation...',
                 type: 'success'
             });
 
-            // Wait for confirmation with timeout
             const confirmation = await connection.confirmTransaction({
                 signature,
                 blockhash,
                 lastValidBlockHeight
             });
-            console.log('Transaction confirmation:', confirmation);
 
             if (confirmation.value.err) {
-                throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+                throw new Error('Transaction failed on chain');
             }
 
-            // Show success toast
             setToast({
                 message: 'Stake account created and delegated to ProStaking successfully!',
                 type: 'success'
@@ -124,11 +106,9 @@ const StakeModal = ({ isOpen, onClose, onSuccess }) => {
             onSuccess();
             onClose();
         } catch (err) {
-            console.error('Error creating stake account:', err);
-            // Show detailed error message
-            const errorMessage = err.message.includes('User rejected')
+            const errorMessage = err?.message?.includes('User rejected')
                 ? 'Transaction cancelled'
-                : `Error creating stake account: ${err.message}`;
+                : `Error creating stake account: ${err?.message ?? 'unknown error'}`;
 
             setToast({
                 message: errorMessage,
@@ -160,10 +140,12 @@ const StakeModal = ({ isOpen, onClose, onSuccess }) => {
                             id="amount"
                             value={amount}
                             onChange={(e) => setAmount(e.target.value)}
-                            min="0"
-                            step="0.1"
+                            min="0.000000001"
+                            max="1000000"
+                            step="0.000000001"
                             required
                             placeholder="Enter amount to stake"
+                            inputMode="decimal"
                         />
                     </div>
                     <div className="modal-actions">
@@ -184,4 +166,4 @@ const StakeModal = ({ isOpen, onClose, onSuccess }) => {
     );
 };
 
-export default StakeModal; 
+export default StakeModal;

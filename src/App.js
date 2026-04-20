@@ -1,36 +1,26 @@
-import React, { FC, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react';
-import { WalletAdapterNetwork } from '@solana/wallet-adapter-base';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-wallets';
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui';
-import { clusterApiUrl } from '@solana/web3.js';
 import StakeAccountList from './components/StakeAccountList';
 import StakeModal from './components/StakeModal';
-import { Connection } from '@solana/web3.js';
+import { RPC_ENDPOINT } from './config/solana';
 import './App.css';
 
-// Default styles that can be overridden by your app
 require('@solana/wallet-adapter-react-ui/styles.css');
 
 const App = () => {
   const [isStakeModalOpen, setIsStakeModalOpen] = useState(false);
-  const network = WalletAdapterNetwork.MainnetBeta;
-  const endpoint = 'https://cherise-ldxzh0-fast-mainnet.helius-rpc.com';
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const wallets = useMemo(
-    () => [
-      new PhantomWalletAdapter(),
-    ],
-    [network]
-  );
+  const wallets = useMemo(() => [new PhantomWalletAdapter()], []);
 
   const handleStakeSuccess = () => {
-    // Refresh the stake accounts list
-    window.location.reload();
+    setRefreshKey((prev) => prev + 1);
   };
 
   return (
-    <ConnectionProvider endpoint={endpoint}>
+    <ConnectionProvider endpoint={RPC_ENDPOINT}>
       <WalletProvider wallets={wallets} autoConnect>
         <WalletModalProvider>
           <div className="App">
@@ -44,7 +34,7 @@ const App = () => {
               </button>
             </header>
             <main>
-              <StakeAccountList />
+              <StakeAccountList key={refreshKey} />
             </main>
             <StakeModal
               isOpen={isStakeModalOpen}

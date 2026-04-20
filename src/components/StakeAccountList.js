@@ -1,11 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { Connection, PublicKey, StakeProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { Transaction } from '@solana/web3.js';
+import { PublicKey, StakeProgram, LAMPORTS_PER_SOL, Transaction } from '@solana/web3.js';
 import Toast from './Toast';
 import MergeStakeModal from './MergeStakeModal';
 import SplitStakeModal from './SplitStakeModal';
+import { connection } from '../config/solana';
+import { isSafeHttpsUrl } from '../utils/validation';
+
+const BASE58_PUBKEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const VALIDATOR_FETCH_TIMEOUT_MS = 5000;
 
 const StakeAccountList = () => {
     const { publicKey, connected, sendTransaction } = useWallet();
@@ -17,35 +21,42 @@ const StakeAccountList = () => {
     const [splitModalOpen, setSplitModalOpen] = useState(false);
     const [selectedStakeAccount, setSelectedStakeAccount] = useState(null);
 
-    const connection = new Connection('https://cherise-ldxzh0-fast-mainnet.helius-rpc.com');
-
     const fetchValidatorInfo = async (voteAccount) => {
-        const url = `https://api.stakewiz.com/validator/${voteAccount}`;
+        const fallback = {
+            name: `Validator ${voteAccount.slice(0, 8)}`,
+            image: null,
+        };
+
+        if (!BASE58_PUBKEY.test(voteAccount)) {
+            return fallback;
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), VALIDATOR_FETCH_TIMEOUT_MS);
+        const url = `https://api.stakewiz.com/validator/${encodeURIComponent(voteAccount)}`;
 
         try {
             const response = await fetch(url, {
                 method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json'
-                }
+                headers: { Accept: 'application/json' },
+                signal: controller.signal,
+                credentials: 'omit',
+                referrerPolicy: 'no-referrer',
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
+            if (!response.ok) return fallback;
 
             const data = await response.json();
-            return {
-                name: data.name || `Validator ${voteAccount.slice(0, 8)}`,
-                image: data.image || null
-            };
-        } catch (error) {
-            console.error("Failed to fetch validator info:", error);
-            return {
-                name: `Validator ${voteAccount.slice(0, 8)}`,
-                image: null
-            };
+            const name = typeof data?.name === 'string' && data.name.length > 0
+                ? data.name.slice(0, 128)
+                : fallback.name;
+            const image = isSafeHttpsUrl(data?.image) ? data.image : null;
+
+            return { name, image };
+        } catch {
+            return fallback;
+        } finally {
+            clearTimeout(timeoutId);
         }
     };
 
@@ -69,6 +80,8 @@ const StakeAccountList = () => {
                 }
             );
 
+            const currentEpoch = await connection.getEpochInfo();
+
             const stakeAccountsData = await Promise.all(
                 accounts.map(async (account) => {
                     const stakeInfo = account.account.data.parsed.info;
@@ -76,12 +89,11 @@ const StakeAccountList = () => {
                         ? stakeInfo.stake.delegation.stake / LAMPORTS_PER_SOL
                         : stakeInfo.meta?.lamports / LAMPORTS_PER_SOL;
 
-                    // If the account is not delegated, return basic info
                     if (!stakeInfo.stake?.delegation) {
                         return {
                             address: account.pubkey.toString(),
                             validatorAddress: null,
-                            amount: amount,
+                            amount,
                             validatorName: 'Not Delegated',
                             validatorImage: null,
                             state: 'inactive'
@@ -91,51 +103,26 @@ const StakeAccountList = () => {
                     const voteAccountAddress = stakeInfo.stake.delegation.voter.toString();
                     const validatorInfo = await fetchValidatorInfo(voteAccountAddress);
 
-                    // Determine the state based on the stake account data
-                    let state = 'inactive';
-                    if (stakeInfo.stake?.delegation) {
-                        const currentEpoch = await connection.getEpochInfo();
-                        const activationEpoch = Number(stakeInfo.stake.delegation.activationEpoch);
-                        const deactivationEpoch = stakeInfo.stake.delegation.deactivationEpoch;
+                    const activationEpoch = Number(stakeInfo.stake.delegation.activationEpoch);
+                    const deactivationEpoch = stakeInfo.stake.delegation.deactivationEpoch;
+                    const isNotDeactivating = deactivationEpoch === '18446744073709551615' || deactivationEpoch === 0;
 
-                        console.log('Stake account state check:', {
-                            address: account.pubkey.toString(),
-                            currentEpoch: currentEpoch.epoch,
-                            activationEpoch,
-                            deactivationEpoch,
-                            delegation: stakeInfo.stake.delegation
-                        });
-
-                        // Check if the account is not deactivating (max uint64 value)
-                        const isNotDeactivating = deactivationEpoch === '18446744073709551615' || deactivationEpoch === 0;
-
-                        if (isNotDeactivating) {
-                            // If activation epoch is greater than or equal to current epoch, it's still activating
-                            if (activationEpoch >= currentEpoch.epoch) {
-                                state = 'activating';
-                            } else {
-                                state = 'active';
-                            }
-                        } else if (Number(deactivationEpoch) > currentEpoch.epoch) {
-                            state = 'deactivating';
-                        } else {
-                            state = 'inactive';
-                        }
-
-                        console.log('Determined state:', state, {
-                            isActivating: activationEpoch >= currentEpoch.epoch,
-                            activationEpoch,
-                            currentEpoch: currentEpoch.epoch
-                        });
+                    let state;
+                    if (isNotDeactivating) {
+                        state = activationEpoch >= currentEpoch.epoch ? 'activating' : 'active';
+                    } else if (Number(deactivationEpoch) > currentEpoch.epoch) {
+                        state = 'deactivating';
+                    } else {
+                        state = 'inactive';
                     }
 
                     return {
                         address: account.pubkey.toString(),
                         validatorAddress: voteAccountAddress,
-                        amount: amount,
+                        amount,
                         validatorName: validatorInfo.name,
                         validatorImage: validatorInfo.image,
-                        state: state
+                        state
                     };
                 })
             );
@@ -143,7 +130,7 @@ const StakeAccountList = () => {
             setStakeAccounts(stakeAccountsData);
         } catch (err) {
             setToast({
-                message: 'Error fetching stake accounts: ' + err.message,
+                message: 'Error fetching stake accounts',
                 type: 'error'
             });
         } finally {
@@ -155,6 +142,7 @@ const StakeAccountList = () => {
         if (connected) {
             fetchStakeAccounts();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [connected, publicKey]);
 
     const handleDeactivate = async (stakeAccountAddress) => {
@@ -163,38 +151,43 @@ const StakeAccountList = () => {
         try {
             setDeactivatingAccount(stakeAccountAddress);
 
-            // Create the deactivate instruction
+            let stakePubkey;
+            try {
+                stakePubkey = new PublicKey(stakeAccountAddress);
+            } catch {
+                throw new Error('Invalid stake account');
+            }
+
             const deactivateInstruction = StakeProgram.deactivate({
-                stakePubkey: new PublicKey(stakeAccountAddress),
+                stakePubkey,
                 authorizedPubkey: publicKey,
             });
 
-            // Create the transaction
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
             const transaction = new Transaction().add(deactivateInstruction);
-
-            // Get the latest blockhash
-            const { blockhash } = await connection.getLatestBlockhash();
             transaction.recentBlockhash = blockhash;
             transaction.feePayer = publicKey;
 
-            // Send the transaction
             const signature = await sendTransaction(transaction, connection);
 
-            // Wait for confirmation
-            await connection.confirmTransaction(signature);
+            const confirmation = await connection.confirmTransaction({
+                signature,
+                blockhash,
+                lastValidBlockHeight,
+            });
 
-            // Show success toast
+            if (confirmation.value.err) {
+                throw new Error('Transaction failed on chain');
+            }
+
             setToast({
                 message: 'Stake account deactivated successfully',
                 type: 'success'
             });
 
-            // Refresh the stake accounts list
             await fetchStakeAccounts();
         } catch (err) {
-            console.error('Error deactivating stake account:', err);
-            // Show user-friendly error message
-            const errorMessage = err.message.includes('User rejected')
+            const errorMessage = err?.message?.includes('User rejected')
                 ? 'Transaction cancelled'
                 : 'Error deactivating stake account';
 
@@ -208,7 +201,6 @@ const StakeAccountList = () => {
     };
 
     const handleMerge = (stakeAccount) => {
-        console.log('Selected stake account for merge:', stakeAccount);
         setSelectedStakeAccount(stakeAccount);
         setMergeModalOpen(true);
     };
@@ -224,10 +216,6 @@ const StakeAccountList = () => {
 
     const handleSplitSuccess = () => {
         fetchStakeAccounts();
-    };
-
-    const handleTransfer = async (stakeAccountAddress) => {
-        // Implement transfer stake logic
     };
 
     if (!connected) {
@@ -276,24 +264,16 @@ const StakeAccountList = () => {
                                             {account.validatorImage && (
                                                 <img
                                                     src={account.validatorImage}
-                                                    alt={account.validatorName}
+                                                    alt=""
                                                     className="validator-image"
+                                                    referrerPolicy="no-referrer"
+                                                    loading="lazy"
                                                 />
                                             )}
                                             <div className="validator-details">
                                                 <span className="validator-name">
                                                     {account.validatorName}
                                                 </span>
-                                                {account.validatorWebsite && (
-                                                    <a
-                                                        href={account.validatorWebsite}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="validator-website"
-                                                    >
-                                                        Website
-                                                    </a>
-                                                )}
                                             </div>
                                         </div>
                                     </td>
@@ -313,18 +293,13 @@ const StakeAccountList = () => {
                                             >
                                                 Split
                                             </button>
-                                            <button
-                                                onClick={() => handleTransfer(account.address)}
-                                                className="action-button transfer-button"
-                                            >
-                                                Transfer
-                                            </button>
                                             {account.state === 'active' && (
                                                 <button
                                                     onClick={() => handleDeactivate(account.address)}
+                                                    disabled={deactivatingAccount === account.address}
                                                     className="action-button deactivate-button"
                                                 >
-                                                    Deactivate
+                                                    {deactivatingAccount === account.address ? 'Deactivating...' : 'Deactivate'}
                                                 </button>
                                             )}
                                         </div>
@@ -352,4 +327,4 @@ const StakeAccountList = () => {
     );
 };
 
-export default StakeAccountList; 
+export default StakeAccountList;

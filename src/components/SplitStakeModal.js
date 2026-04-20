@@ -1,15 +1,17 @@
 import React, { useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import {
-    Connection,
-    PublicKey,
     Transaction,
     StakeProgram,
     ComputeBudgetProgram,
     Keypair,
-    LAMPORTS_PER_SOL
+    LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import Toast from './Toast';
+import { connection } from '../config/solana';
+import { parseSolAmount, toPublicKey } from '../utils/validation';
+
+const CONFIRM_TIMEOUT_MS = 120000;
 
 const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
     const { publicKey, signTransaction } = useWallet();
@@ -18,30 +20,28 @@ const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
     const [amount, setAmount] = useState('');
     const [error, setError] = useState('');
 
-    const connection = new Connection('https://cherise-ldxzh0-fast-mainnet.helius-rpc.com');
-
-    const checkTransactionStatus = async (signature, timeout = 120000) => {
+    const waitForConfirmation = async (signature, lastValidBlockHeight) => {
         const startTime = Date.now();
-        while (Date.now() - startTime < timeout) {
+        while (Date.now() - startTime < CONFIRM_TIMEOUT_MS) {
             try {
                 const status = await connection.getSignatureStatus(signature);
-
-                if (status && status.value) {
-                    // Check for any errors
-                    if (status.value.err) {
-                        throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`);
-                    }
-
-                    // Consider both 'confirmed' and 'finalized' as successful
-                    if (status.value.confirmationStatus === 'confirmed' ||
-                        status.value.confirmationStatus === 'finalized') {
-                        return true;
-                    }
+                if (status?.value?.err) {
+                    throw new Error('Transaction failed on chain');
+                }
+                if (
+                    status?.value?.confirmationStatus === 'confirmed' ||
+                    status?.value?.confirmationStatus === 'finalized'
+                ) {
+                    return true;
+                }
+                const blockHeight = await connection.getBlockHeight();
+                if (lastValidBlockHeight && blockHeight > lastValidBlockHeight) {
+                    return false;
                 }
             } catch (err) {
-                // Silent error handling
+                if (err?.message === 'Transaction failed on chain') throw err;
             }
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Poll every 2 seconds
+            await new Promise((resolve) => setTimeout(resolve, 2000));
         }
         return false;
     };
@@ -54,90 +54,77 @@ const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
             setLoading(true);
             setError('');
 
-            const amountSOL = parseFloat(amount);
-            if (isNaN(amountSOL) || amountSOL <= 0) {
-                throw new Error('Please enter a valid amount');
-            }
+            const lamportsToSplit = parseSolAmount(amount);
 
-            // Generate new stake account keypair
+            const sourceStakePubkey = toPublicKey(stakeAccount.address, 'source stake account');
+
             const newStakeAccount = Keypair.generate();
 
-            // Check if the generated account already exists
             const accountInfo = await connection.getAccountInfo(newStakeAccount.publicKey);
             if (accountInfo !== null) {
-                throw new Error("An account with the generated public key already exists.");
+                throw new Error('Generated stake account collides with an existing one; please retry');
             }
 
-            // Get rent-exempt balance
             const rentExemptBalance = await connection.getMinimumBalanceForRentExemption(StakeProgram.space);
-            const lamportsToSplit = amountSOL * LAMPORTS_PER_SOL;
 
             if (lamportsToSplit <= rentExemptBalance) {
-                throw new Error("Amount to split must be greater than the rent-exempt minimum");
+                throw new Error(
+                    `Amount must be greater than rent-exempt minimum (~${(rentExemptBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL)`
+                );
             }
 
-            // Create split instruction
-            const splitInstruction = StakeProgram.split({
-                stakePubkey: new PublicKey(stakeAccount.address),
-                authorizedPubkey: publicKey,
-                splitStakePubkey: newStakeAccount.publicKey,
-                lamports: lamportsToSplit
-            });
+            const splitTx = StakeProgram.split(
+                {
+                    stakePubkey: sourceStakePubkey,
+                    authorizedPubkey: publicKey,
+                    splitStakePubkey: newStakeAccount.publicKey,
+                    lamports: lamportsToSplit
+                },
+                rentExemptBalance
+            );
 
-            // Add priority fee instruction
-            const PRIORITY_FEE_IX = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10000 });
+            const priorityFeeIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10000 });
 
-            // Create and configure the transaction
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+
             const transaction = new Transaction()
-                .add(splitInstruction)
-                .add(PRIORITY_FEE_IX);
-
-            // Get the latest blockhash
-            const { blockhash } = await connection.getRecentBlockhash();
+                .add(...splitTx.instructions)
+                .add(priorityFeeIx);
             transaction.recentBlockhash = blockhash;
+            transaction.lastValidBlockHeight = lastValidBlockHeight;
             transaction.feePayer = publicKey;
 
-            // Show transaction submitted toast
             setToast({
                 message: 'Please approve the transaction in your wallet...',
                 type: 'success'
             });
 
-            // Sign the transaction
             const signedTransaction = await signTransaction(transaction);
-
-            // Add the new stake account's signature
             signedTransaction.partialSign(newStakeAccount);
 
-            // Send the raw transaction
             const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
                 skipPreflight: false,
                 preflightCommitment: 'confirmed',
                 maxRetries: 3
             });
 
-            // Show confirmation toast
             setToast({
                 message: 'Transaction submitted. Waiting for confirmation...',
                 type: 'success'
             });
 
-            // Wait for confirmation with retries
-            const confirmed = await checkTransactionStatus(signature);
+            const confirmed = await waitForConfirmation(signature, lastValidBlockHeight);
 
             if (!confirmed) {
-                // Instead of throwing an error, just show a warning toast
                 setToast({
                     message: 'Transaction submitted but confirmation status unknown. Please check your wallet.',
                     type: 'warning'
                 });
-                // Still consider this a success since the transaction was sent
                 onSuccess();
                 onClose();
                 return;
             }
 
-            // Show success toast
             setToast({
                 message: 'Stake account split successfully!',
                 type: 'success'
@@ -146,9 +133,10 @@ const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
             onSuccess();
             onClose();
         } catch (err) {
-            setError(err.message);
+            const message = err?.message ?? 'unknown error';
+            setError(message);
             setToast({
-                message: `Error splitting stake account: ${err.message}`,
+                message: `Error splitting stake account: ${message}`,
                 type: 'error'
             });
         } finally {
@@ -186,8 +174,10 @@ const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
                             value={amount}
                             onChange={(e) => setAmount(e.target.value)}
                             step="0.000000001"
-                            min="0"
+                            min="0.000000001"
+                            max="1000000"
                             required
+                            inputMode="decimal"
                         />
                         {error && <p className="error-message">{error}</p>}
                     </div>
@@ -209,4 +199,4 @@ const SplitStakeModal = ({ isOpen, onClose, onSuccess, stakeAccount }) => {
     );
 };
 
-export default SplitStakeModal; 
+export default SplitStakeModal;
