@@ -26,7 +26,7 @@ React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts 
 - Node is pinned to `20.18.0` via `.nvmrc` and `package.json` `engines`. The app will refuse to install/build on other versions.
 - `yarn start` — CRA dev server on `:3000` (craco config). Expect source-map warnings from `@trezor/*` and `@reown/*`; those are cosmetic.
 - `yarn build` — production bundle. Needs `"vm": false` in `craco.config.js`'s `resolve.fallback` for `asn1.js` to compile under webpack 5 (already set).
-- Container: `docker buildx build --builder desktop-linux --platform linux/amd64 -t juicystake/tools:<tag> --load .`
+- Container: `docker buildx build --builder desktop-linux --platform linux/amd64 --build-arg REACT_APP_RPC_ENDPOINT=<url> -t juicystake/tools:<tag> --load .` (`REACT_APP_RPC_ENDPOINT` is a build ARG in `Dockerfile`; without it the fallback `api.mainnet-beta.solana.com` is baked in and 403s on `getParsedProgramAccounts`.)
   - Deployment target is `linux/amd64`; default `docker build` on an arm64 Mac produces arm64 images that won't run on the host.
   - Build stage needs `python3 make g++ linux-headers eudev-dev libusb-dev` in Alpine for `node-gyp` to compile the native `usb` module pulled in by `@solana/wallet-adapter-wallets` → Trezor. (Installing only `@solana/wallet-adapter-phantom` would remove this dependency chain — see follow-ups in `SECURITY_AUDIT.md`.)
   - Runtime is `nginx:1.27-alpine`; security headers live in `nginx.conf` (strict CSP, frame-ancestors none, HSTS, etc.).
@@ -36,5 +36,5 @@ React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts 
 
 - `@solana/wallet-adapter-wallets` brings in the full wallet set including Trezor USB; currently only Phantom is actually instantiated in `App.js`. Dropping the meta-package in favor of `@solana/wallet-adapter-phantom` would eliminate the native-build requirement and shrink the image.
 - `react-scripts@5.0.1` is unmaintained; `npm audit` will flag transitive build-time CVEs (`nth-check@1.0.2`, `svgo@1.3.2`, `webpack-dev-server@4.15.2`). These do not ship in the runtime bundle and are not reachable in the production container (nginx serves the built static files). A migration off CRA is on the follow-up list.
-- The previously-hardcoded Helius RPC URL (`cherise-ldxzh0-…-helius-rpc.com`) is still in git history (commit `6c7381e` and earlier) and should be treated as compromised — rotate before the new tenant relies on it.
+- The Helius RPC URL (`cherise-ldxzh0-…-helius-rpc.com`) is an intentionally-public, rate-limited, origin-scoped "webapp frontend" key. Baking it into the bundle via `REACT_APP_RPC_ENDPOINT` is the designed flow, not a leak — confirmed with the project owner. No rotation needed.
 - `SECURITY_AUDIT.md` at the repo root is the canonical record of the 2026-04-20 audit: findings, remediations, residual risks.

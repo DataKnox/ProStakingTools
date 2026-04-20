@@ -9,6 +9,9 @@ COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile --network-timeout 600000
 
 COPY . .
+
+ARG REACT_APP_RPC_ENDPOINT
+ENV REACT_APP_RPC_ENDPOINT=${REACT_APP_RPC_ENDPOINT}
 RUN yarn build
 
 FROM nginx:1.27-alpine AS runtime

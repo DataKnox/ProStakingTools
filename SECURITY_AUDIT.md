@@ -220,8 +220,8 @@ A "Transfer" button existed in the UI wired to an empty handler. Kept as UI bait
 
 ## Residual risk & follow-ups
 
-1. **RPC endpoint is still client-side.** Any `REACT_APP_*` value is embedded in the built JavaScript. If this endpoint must remain secret (paid quota, rate-limited key), front the RPC calls with a backend proxy and drop `REACT_APP_RPC_ENDPOINT` from the client.
+1. **RPC endpoint is still client-side.** Any `REACT_APP_*` value is embedded in the built JavaScript. The project owner confirmed the Helius endpoint in use is a rate-limited, origin-scoped "public-frontend" key intended to ship in the bundle — that matches the design, so this is not a live risk. If a future key ever represents real spend authority, front it with a backend proxy instead.
 2. **`react-scripts@5.0.1` is unmaintained.** Transitive build-time CVEs cannot be patched without migrating off CRA. Planning a move to Vite or Next.js is recommended.
 3. **Third-party dependency on `api.stakewiz.com`.** If Stakewiz is compromised, the UI will show attacker-chosen names; image rendering is now scheme-restricted but an attacker could still point to a valid HTTPS resource to exfiltrate view events. Consider an allow-list of known validator metadata sources or caching server-side.
 4. **No automated security testing.** Recommend adding `npm audit --production` to CI (or equivalent), plus a Snyk/Dependabot policy, and a script test for the input validators added in this audit.
-5. **Rotate the previously-exposed Helius RPC identifier.** It has been in the public git history; assume it is compromised and issue a new one.
+5. ~~Rotate the previously-exposed Helius RPC identifier.~~ Withdrawn: the Helius endpoint (`cherise-ldxzh0-fast-mainnet.helius-rpc.com`) is an intentionally-public, rate-limited, origin-scoped "webapp frontend" key designed to be shipped in the client bundle. Its presence in git history does not constitute a leak.
