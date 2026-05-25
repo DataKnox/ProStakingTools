@@ -10,7 +10,7 @@
     "@solana/wallet-adapter-react": "^0.15.35",
     "@solana/wallet-adapter-react-ui": "^0.9.34",
     "@solana/wallet-adapter-base": "^0.9.23",
-    "@solana/wallet-adapter-wallets": "^0.19.25",
+    "@solana/wallet-adapter-phantom": "^0.9.27",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
@@ -31,6 +31,9 @@
   },
   "devDependencies": {
     "@craco/craco": "^7.1.0"
+  },
+  "resolutions": {
+    "bn.js": "^5.2.3"
   },
   "scripts": {
     "start": "craco start",
