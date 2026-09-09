@@ -101,6 +101,8 @@ This reassigned the pubkey of the second `AccountMeta` in the first instruction 
 
 **Fix:** Removed the line entirely; the merge instruction from `StakeProgram.merge(...)` already has the correct keys.
 
+> **Correction (2026-09-09):** the mutation was *not* a no-op — it was masking a parameter-name typo (`sourceStakePubkey` vs web3.js's actual `sourceStakePubKey`) that left `keys[1].pubkey` undefined, and removing it without fixing the name broke merges entirely. The removal was still directionally right (mutating instruction internals is fragile); the real defect was the parameter name. See D-1 in the 2026-09-09 delta below.
+
 ---
 
 ### M-6 — `StakeProgram.split` called without `rentExemptReserve`
@@ -225,3 +227,70 @@ A "Transfer" button existed in the UI wired to an empty handler. Kept as UI bait
 3. **Third-party dependency on `api.stakewiz.com`.** If Stakewiz is compromised, the UI will show attacker-chosen names; image rendering is now scheme-restricted but an attacker could still point to a valid HTTPS resource to exfiltrate view events. Consider an allow-list of known validator metadata sources or caching server-side.
 4. **No automated security testing.** Recommend adding `npm audit --production` to CI (or equivalent), plus a Snyk/Dependabot policy, and a script test for the input validators added in this audit.
 5. ~~Rotate the previously-exposed Helius RPC identifier.~~ Withdrawn: the Helius endpoint (`cherise-ldxzh0-fast-mainnet.helius-rpc.com`) is an intentionally-public, rate-limited, origin-scoped "webapp frontend" key designed to be shipped in the client bundle. Its presence in git history does not constitute a leak.
+
+---
+
+# Delta — 2026-09-09 adversarial re-review
+
+**Trigger:** user report that stake-account merging was broken. Scope: full re-review of `src/**`, `nginx.conf`, `Dockerfile`, build config, dependency lockfile. All D-numbered findings below were fixed the same day; open items are listed under *Recommended*.
+
+## D-1 — Merge flow broken by web3.js parameter-name mismatch (regression traced to M-5's fix)
+**Severity:** High (functional; no fund-safety impact)
+**File:** `src/components/MergeStakeModal.js`
+
+`StakeProgram.merge()` destructures `sourceStakePubKey` — **capital K** — in every web3.js version this project can resolve (verified against the installed 1.98.2, both CJS and browser ESM builds, and the published typings). The app passed `sourceStakePubkey` (lowercase k), which is silently ignored, so the source AccountMeta was built with `pubkey: undefined`. Message compilation inside the wallet's `signTransaction` then throws `TypeError: Cannot read properties of undefined (reading 'toString')` — every merge failed before a transaction existed. No signature was ever produced, so there was no on-chain or fund-safety exposure; the failure mode was pure denial of function.
+
+The original pre-audit code "worked" only because the M-5 key mutation overwrote the `undefined` back to a real pubkey — it was a load-bearing workaround for this typo, not a redundant line (see correction under M-5).
+
+**Fix:** pass `sourceStakePubKey`, with an inline comment flagging the capital-K trap. Verified by deterministically reproducing the failure against the installed web3.js, then confirming the fixed transaction compiles and `StakeInstruction.decodeMerge` round-trips source/destination/authority correctly. `yarn build` clean.
+
+## D-2 — Stale merge destination retained across modal opens
+**Severity:** Low
+**File:** `src/components/MergeStakeModal.js`
+
+`selectedStakeAccount` state survived close/reopen, so a destination chosen for a previous merge could carry into the next one. Native `required` validation masks the dangerous case (stale address absent from the new option list resets the DOM value), but the state/DOM mismatch was fragile. **Fix:** the selection resets whenever the modal opens for a source account.
+
+## D-3 — nginx served all static assets without any security header
+**Severity:** Medium
+**Files:** `nginx.conf`, `security-headers.conf` (new), `Dockerfile`
+
+nginx `add_header` directives are inherited only into blocks that define **none** of their own. The static-asset `location` set `Cache-Control`, which silently dropped CSP, `X-Content-Type-Options`, HSTS, `X-Frame-Options`, `Referrer-Policy`, and `Permissions-Policy` on every JS/CSS/image response. The HTML document (served by `location /`, which had no `add_header`) kept its headers, so page-level CSP enforcement was unaffected — but `nosniff` on script responses is precisely the header you want present everywhere.
+
+**Fix:** headers moved to `security-headers.conf`, included in the `server` block **and** in every `location`; a comment in the file documents the inheritance rule for future edits. The file lives at `/etc/nginx/security-headers.conf`, deliberately outside `conf.d/` (which the stock image auto-includes at `http` level). Verified by serving the production build under `nginx:1.30.2-alpine` and curling: the full header set is now present on `/` and on hashed assets.
+
+## D-4 — SPA shell cached heuristically; stale bundles could outlive deploys
+**Severity:** Medium-Low (availability + patch propagation)
+**File:** `nginx.conf`
+
+`index.html` was served with no `Cache-Control`, leaving caching to browser heuristics. A cached shell can reference purged hashed bundles (broken app after a deploy) and — the security angle — keep a vulnerable bundle live after a fix ships. **Fix:** `location /` now sends `Cache-Control: no-cache` (cache but revalidate; 304s keep it cheap). Hashed assets send a single explicit `Cache-Control: public, max-age=31536000, immutable`, replacing `expires 1y` + a second `Cache-Control` header (the old pair emitted two `Cache-Control` headers on one response).
+
+## Attacks attempted with no finding
+
+- Hostile-RPC poisoning of `getParsedProgramAccounts` fields (`voter`, `stake`, malformed parsed JSON): degrades to fallbacks; no sink reached.
+- Injection surfaces: no `dangerouslySetInnerHTML` / `eval` / inline handlers; React escaping everywhere; Stakewiz fields type-checked, clamped, scheme-gated.
+- CSP bypass: the built `index.html` contains zero inline scripts, so `script-src 'self'` is genuinely enforceable; no third-party JS at all.
+- Supply chain: `yarn.lock` resolves 100% from the npm registry; web3.js resolves to 1.98.2 (not the compromised 1.95.6/1.95.7 from the December 2024 npm attack); the `bn.js` resolution pin is effective under Yarn classic.
+- Fund-safety: no private-key handling; new-account authorities always the connected wallet; split inherits source authorities, so discarded keypairs retain zero power; amount parsing is integer-safe and bounded even for scientific/hex string input.
+
+## Recommended (not applied)
+
+1. **Tighten CSP `connect-src`** from `https: wss:` to the deployment's RPC host + `api.stakewiz.com`. Deployment-specific: `nginx.conf` is static while the RPC endpoint is a build arg, so this needs per-deployment templating. Same consideration for `img-src https:` (validator images may point anywhere; the metadata/image proxy from April residual #3 would close both the tracking and exfiltration channels).
+2. **Run nginx unprivileged:** `nginxinc/nginx-unprivileged:1.30.2-alpine` is drop-in (the config already listens on 8080).
+3. **Pin base images by digest** (`node:20.18.0-alpine@sha256:…`, `nginx:1.30.2-alpine@sha256:…`) — tags are mutable.
+4. **Strip Unicode control/bidi characters** (e.g. U+202E) from the Stakewiz `name` before render; clamping + React escaping don't prevent visual row spoofing.
+5. **Merge eligibility:** exclude `deactivating` accounts (on-chain `MergeTransientStake` always fails — a second way "merge doesn't work" can present) and relax the validator-equality requirement for fully `inactive` pairs, which merge regardless of former validator.
+6. **Delete dead `config-overrides.js`** (react-app-rewired leftover; lacks `vm: false` and would break the build if ever trusted over `craco.config.js`).
+7. `package.json` `engines: ">=20.18.0"` is a floor, not a pin; use `20.18.x` if a pin is intended.
+8. Replace the stock CRA `App.test.js` (fails against the real app) with tests for `src/utils/validation.js` (April follow-up #4).
+9. Hygiene: success toasts unmount with their modal and are never seen; deactivate/stake flows go through Phantom's own RPC (adapter `sendTransaction`) with no priority fee while merge/split use the app RPC with one; accounts are listed by **withdrawer** (memcmp offset 44) but every operation requires **staker** authority, so imported accounts with split authorities list-but-fail; Google Fonts (`@import` in `App.css`) is the only third-party origin besides RPC/Stakewiz — self-host to remove it.
+
+## Files changed (this delta)
+
+| Path | Change |
+|------|--------|
+| `src/components/MergeStakeModal.js` | `sourceStakePubKey` param fix (D-1); destination reset on open (D-2) |
+| `nginx.conf` | Per-location security-header include; `no-cache` shell; single-header immutable assets (D-3, D-4) |
+| `security-headers.conf` | **NEW** — shared security headers with inheritance-rule comment (D-3) |
+| `Dockerfile` | Copies `security-headers.conf` into the runtime image (D-3) |
+| `SECURITY_AUDIT.md` | This delta; correction note under M-5 |
+| `CLAUDE.md` | Documented the capital-K `sourceStakePubKey` trap and the header include |

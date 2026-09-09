@@ -20,6 +20,7 @@ React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts 
 - **No `console.log` on user/wallet state.** Pubkeys, amounts, and signatures must not be logged in production paths.
 - **No `window.location.reload()` for refresh.** Use a React `key` bump.
 - Web3.js resolved version is 1.98.2 (via `^1.87.6`). `StakeProgram.split(params, rentExemptReserve)` is the required two-arg signature — omitting the second arg produces a broken transaction.
+- `StakeProgram.merge()` takes `sourceStakePubKey` — **capital K**. The lowercase-k spelling is silently ignored and yields an `undefined` account key that only blows up later, inside the wallet's `signTransaction`. (The pre-audit `keys[1]` mutation was masking exactly this typo.)
 
 ## Build & run
 
@@ -29,7 +30,7 @@ React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts 
 - Container: `docker buildx build --builder desktop-linux --platform linux/amd64 --build-arg REACT_APP_RPC_ENDPOINT=<url> -t juicystake/tools:<tag> --load .` (`REACT_APP_RPC_ENDPOINT` is a build ARG in `Dockerfile`; without it the fallback `api.mainnet-beta.solana.com` is baked in and 403s on `getParsedProgramAccounts`.)
   - Deployment target is `linux/amd64`; default `docker build` on an arm64 Mac produces arm64 images that won't run on the host.
   - Build stage is now pure JS — no Alpine native toolchain needed. The `@solana/wallet-adapter-wallets` meta-package (which pulled Trezor → native `usb`) was dropped in favor of `@solana/wallet-adapter-phantom`, so `node-gyp` no longer runs during install.
-  - Runtime is `nginx:1.30.2-alpine` (was 1.27 — bumped 2026-05-25 to clear CVE-2026-42945 "NGINX Rift" and the 1.28/1.29/1.30 quarterly CVEs); security headers live in `nginx.conf` (strict CSP, frame-ancestors none, HSTS, etc.).
+  - Runtime is `nginx:1.30.2-alpine` (was 1.27 — bumped 2026-05-25 to clear CVE-2026-42945 "NGINX Rift" and the 1.28/1.29/1.30 quarterly CVEs); security headers live in `security-headers.conf` (strict CSP, frame-ancestors none, HSTS, etc.), which `nginx.conf` includes in the `server` block **and in every `location`** — nginx drops all inherited `add_header`s in any block that adds its own, so new locations must repeat the include.
 - Meta CSP in `public/index.html` is intentionally lenient (`'unsafe-inline' 'unsafe-eval'`) so CRA HMR works in dev. The nginx CSP header is strict and takes precedence in prod because browsers enforce the intersection of meta + header.
 
 ## Gotchas / known landmines
@@ -39,4 +40,4 @@ React 19 + `@solana/web3.js` single-page app for managing Solana stake accounts 
 - `crypto-browserify`/`stream-browserify`/etc. are listed as runtime deps but are NOT in the production bundle — they only activate as webpack `resolve.fallback` shims, and nothing in the Phantom-only tree calls `require('crypto')`. The npm audit advisories under those packages (`sha.js`, `pbkdf2`) are dev-install noise, not runtime risk.
 - `react-scripts@5.0.1` is unmaintained; `npm audit` will flag transitive build-time CVEs (`nth-check@1.0.2`, `svgo@1.3.2`, `webpack-dev-server@4.15.2`, jsdom→form-data, etc.). These do not ship in the runtime bundle and are not reachable in the production container (nginx serves the built static files). A migration off CRA is on the follow-up list.
 - The Helius RPC URL (`cherise-ldxzh0-…-helius-rpc.com`) is an intentionally-public, rate-limited, origin-scoped "webapp frontend" key. Baking it into the bundle via `REACT_APP_RPC_ENDPOINT` is the designed flow, not a leak — confirmed with the project owner. No rotation needed.
-- `SECURITY_AUDIT.md` at the repo root is the canonical record of the 2026-04-20 audit; see the 2026-05-25 delta in commit history for the follow-up that dropped the wallet meta-package, bumped nginx, and pinned `bn.js`.
+- `SECURITY_AUDIT.md` at the repo root is the canonical record of the 2026-04-20 audit; see the 2026-05-25 delta in commit history for the follow-up that dropped the wallet meta-package, bumped nginx, and pinned `bn.js`, and the 2026-09-09 delta section in the doc itself for the merge-fix + nginx-header follow-up.

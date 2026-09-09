@@ -23,6 +23,7 @@ const MergeStakeModal = ({ isOpen, onClose, onSuccess, sourceStakeAccount, stake
                     account.validatorAddress === sourceStakeAccount.validatorAddress
             );
             setMergeableAccounts(accounts);
+            setSelectedStakeAccount('');
         }
     }, [sourceStakeAccount, stakeAccounts]);
 
@@ -72,7 +73,10 @@ const MergeStakeModal = ({ isOpen, onClose, onSuccess, sourceStakeAccount, stake
 
             const mergeTx = StakeProgram.merge({
                 stakePubkey: destinationStakeAccountPubkey,
-                sourceStakePubkey: sourceStakeAccountPubkey,
+                // web3.js MergeStakeParams spells this with a capital K
+                // (sourceStakePubKey); the lowercase-k variant is silently
+                // ignored and leaves the source account key undefined.
+                sourceStakePubKey: sourceStakeAccountPubkey,
                 authorizedPubkey: publicKey,
             });
 

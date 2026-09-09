@@ -15,6 +15,7 @@ FROM nginx:1.30.2-alpine AS runtime
 
 COPY --from=build /app/build /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY security-headers.conf /etc/nginx/security-headers.conf
 
 EXPOSE 8080
 
